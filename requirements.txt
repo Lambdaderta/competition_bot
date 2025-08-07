@@ -1,0 +1,4 @@
+aiogram==3.21.0
+aiosqlite==0.21.0
+dotenv==0.9.9
+SQLAlchemy==2.0.42
