@@ -6,8 +6,7 @@ from utils.mmr_calculator import parse_range_input
 from database import get_sessionmaker, crud
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# Импорты из других частей проекта
-# --- ИЗМЕНЕНО: Импортируем новую клавиатуру ---
+
 from keyboards.org_keyboard import (
     get_organizer_main_menu,
     get_rating_type_keyboard,
@@ -15,14 +14,18 @@ from keyboards.org_keyboard import (
     get_yes_no_cancel_keyboard,
     get_add_range_rule_keyboard,
     get_confirmation_keyboard,
-    get_bot_add_to_chat_keyboard # <-- НОВАЯ КЛАВИАТУРА
+    get_bot_add_to_chat_keyboard,
+    get_my_competitions_keyboard
 )
 from states.org_states import CompetitionCreation
 from urllib.parse import urlparse 
 
+import math 
+
+ITEMS_PER_PAGE = 10
+
 router = Router()
 
-# --- Вход в меню Организатора ---
 @router.callback_query(F.data == "role_organizer")
 async def enter_organizer_menu(callback: CallbackQuery):
     await callback.message.edit_text(
@@ -41,6 +44,7 @@ async def start_create_competition(callback: CallbackQuery, state: FSMContext):
         reply_markup=get_cancel_creation_keyboard()
     )
     await callback.answer()
+
 
 # --- Получение названия соревнования ---
 @router.message(CompetitionCreation.waiting_for_name)
@@ -693,17 +697,104 @@ async def confirm_competition_creation(callback: CallbackQuery, state: FSMContex
             )
             
         except Exception as e:
-            # 8. Обрабатываем любые ошибки
             import logging
             logging.error(f"Ошибка создания соревнования: {e}", exc_info=True)
             await callback.message.edit_text(
-                f"❌ Ошибка при создании соревнования: {str(e)}\n" # str(e) для более понятного сообщения
+                f"❌ Ошибка при создании соревнования: {str(e)}\n" 
                 f"Пожалуйста, попробуйте еще раз или обратитесь к разработчику."
             )
-            # Примечание: При использовании async with, сессия db будет автоматически закрыта
-            # при выходе из блока, даже если произошло исключение.
             
     # 9. Очищаем состояние FSM и отвечаем на callback
     await state.clear()
     await callback.answer()
-    # Закрытие сессии (await db.close()) происходит автоматически благодаря async with
+
+
+
+
+# ОБРАБОТКА "МОИ СОРЕВНОВАНИЯ"
+
+@router.callback_query(F.data == "my_competitions")
+async def show_my_competitions(callback: CallbackQuery):
+    """Показывает список соревнований, где пользователь админ, с пагинацией."""
+    await show_my_competitions_page(callback, page=1)
+
+async def show_my_competitions_page(callback: CallbackQuery, page: int):
+    """Вспомогательная функция для отображения конкретной страницы."""
+    AsyncSessionLocal = get_sessionmaker()
+    async with AsyncSessionLocal() as db:
+        try:
+            # Получаем внутренний ID пользователя
+            db_user = await crud.get_user_by_id(db, callback.from_user.id)
+            if not db_user:
+                 await callback.message.edit_text("Ошибка: Вы не зарегистрированы в системе.")
+                 await callback.answer()
+                 return
+
+            internal_user_id = db_user.id
+
+            # Получаем ВСЕ соревнования, где пользователь админ
+            # Это может быть неэффективно для очень больших списков, но для начала сойдет
+            # В будущем можно оптимизировать с помощью JOIN и LIMIT/OFFSET в SQL
+            all_competitions = await crud.get_administered_competitions(db, internal_user_id)
+            
+            if not all_competitions:
+                await callback.message.edit_text(
+                    "У вас нет соревнований, где вы являетесь администратором.",
+                    reply_markup=get_organizer_main_menu() # Возвращаем в меню организатора
+                )
+                await callback.answer()
+                return
+
+            total_items = len(all_competitions)
+            total_pages = math.ceil(total_items / ITEMS_PER_PAGE) or 1 # Минимум 1 страница
+
+            # Проверяем корректность номера страницы
+            if page < 1:
+                page = 1
+            elif page > total_pages:
+                page = total_pages
+
+            # Вычисляем индексы для среза
+            start_index = (page - 1) * ITEMS_PER_PAGE
+            end_index = start_index + ITEMS_PER_PAGE
+            competitions_on_page = all_competitions[start_index:end_index]
+
+            # Формируем текст сообщения
+            if total_pages > 1:
+                header = f"<b>Мои соревнования</b> (Страница {page}/{total_pages}):\n\n"
+            else:
+                header = "<b>Мои соревнования:</b>\n\n"
+            
+            if competitions_on_page:
+                comp_lines = []
+                for comp in competitions_on_page:
+                    comp_lines.append(f"• <b>{comp.name}</b> (ID: {comp.id})")
+                body = "\n".join(comp_lines)
+            else:
+                body = "На этой странице соревнований нет."
+
+            message_text = header + body
+
+            # Отправляем/редактируем сообщение с клавиатурой пагинации
+            await callback.message.edit_text(
+                message_text,
+                reply_markup=get_my_competitions_keyboard(competitions_on_page, page, total_pages, ITEMS_PER_PAGE)
+            )
+            await callback.answer()
+
+        except Exception as e:
+            await callback.message.edit_text(
+                f"❌ Произошла ошибка: {e}",
+                reply_markup=get_organizer_main_menu()
+            )
+            await callback.answer()
+
+# --- Хендлер для навигации по страницам ---
+@router.callback_query(F.data.startswith("my_comps_page_"))
+async def navigate_my_competitions(callback: CallbackQuery):
+    """Обрабатывает нажатие кнопок навигации по страницам 'Мои соревнования'."""
+    try:
+        page_num = int(callback.data.split("_")[-1])
+        await show_my_competitions_page(callback, page=page_num)
+    except (ValueError, IndexError):
+        await callback.answer("Ошибка навигации.", show_alert=True)

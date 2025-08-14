@@ -1,12 +1,12 @@
-# database/crud.py (АСИНХРОННЫЙ)
 import time
 from typing import List, Dict, Any, Optional
-# from sqlalchemy.orm import Session # <-- УДАЛЯЕМ
 from sqlalchemy.exc import IntegrityError
-# Импортируем асинхронные элементы
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, delete, and_
-from sqlalchemy.orm import selectinload # Если понадобится жадная загрузка связей
+from sqlalchemy import select, and_, distinct
+
+from sqlalchemy.orm import selectinload
+
+from sqlalchemy import select
 
 import logging
 
@@ -102,8 +102,11 @@ async def create_competition(
 
 async def get_competition_by_name(db: AsyncSession, name: str) -> Optional[models.Competition]: 
     """Получает соревнование по его названию."""
-    result = await db.execute(select(models.Competition).where(models.Competition.name == name)) 
-    return result.scalars().first() 
+    result = await db.execute(
+        select(models.Competition)
+        .where(models.Competition.name == name)
+    )
+    return result.scalars().first()
 
 
 async def get_competition_by_id(db: AsyncSession, comp_id: int) -> Optional[models.Competition]: 
@@ -113,17 +116,17 @@ async def get_competition_by_id(db: AsyncSession, comp_id: int) -> Optional[mode
 
 
 # ---- Player CRUD ----
-async def get_or_create_player( 
-    db: AsyncSession, 
+async def get_or_create_player(
+    db: AsyncSession,
     competition_id: int,
     user_id: int,
     start_mmr: Optional[int] = None
 ) -> models.Player:
-    """
-    Получает участника соревнования или создает нового.
-    """
+    """Получает участника соревнования или создает нового."""
+    # Используем selectinload для жадной загрузки связанного объекта User
     result = await db.execute(
         select(models.Player)
+        .options(selectinload(models.Player.user)) # <-- ВАЖНО
         .where(
             and_(
                 models.Player.competition_id == competition_id,
@@ -154,6 +157,7 @@ async def get_or_create_player(
             await db.rollback() 
             result = await db.execute(
                 select(models.Player)
+                .options(selectinload(models.Player.user))
                 .where(
                     and_(
                         models.Player.competition_id == competition_id,
@@ -217,12 +221,17 @@ async def update_player_stats_after_match(
             player.streak = -1 # Сброс серии побед
 
     if achievements_gained:
-        current_achievements = player.achievements or {}
+        # 1. Получаем текущий словарь достижений игрока
+        #    (Используем .copy() или dict() для создания копии, если он существует)
+        current_achievements = player.achievements.copy() if player.achievements else {}
+        
+        # 2. Обновляем копию словаря
         for ach in achievements_gained:
             if ach in current_achievements:
                 current_achievements[ach] += 1
             else:
                 current_achievements[ach] = 1
+        
         player.achievements = current_achievements
 
     await db.commit() 
@@ -269,62 +278,39 @@ async def create_match(
             achievements_gained=p_data.get("achievements", [])
         )
 
-    await db.commit() # <-- ASYNC CHANGE
-    # await db.refresh(match)
+    await db.commit() 
     return match
 
-# ---- Дополнительные функции ----
-async def get_player_stats(db: AsyncSession, competition_id: int, user_id: int) -> Optional[models.Player]: # <-- ASYNC CHANGE
-    """Получает полную статистику игрока в соревновании."""
-    result = await db.execute(
-        select(models.Player)
-        .where(
-            and_(
-                models.Player.competition_id == competition_id,
-                models.Player.user_id == user_id
-            )
-        )
-    )
-    return result.scalars().first() # <-- ASYNC CHANGE
 
-async def get_competition_players(db: AsyncSession, competition_id: int) -> List[models.Player]: # <-- ASYNC CHANGE
+
+
+async def get_competition_players(db: AsyncSession, competition_id: int) -> List[models.Player]: 
     """Получает список всех игроков в соревновании, отсортированных по MMR."""
     result = await db.execute(
         select(models.Player)
         .where(models.Player.competition_id == competition_id)
         .order_by(models.Player.mmr.desc())
+        .options(selectinload(models.Player.user))
     )
-    return list(result.scalars().all()) # <-- ASYNC CHANGE
+    return list(result.scalars().all()) 
 
-async def get_user_competitions(db: AsyncSession, user_id: int) -> List[models.Competition]: # <-- ASYNC CHANGE
+
+async def get_user_competitions(db: AsyncSession, user_id: int) -> List[models.Competition]: 
     """Получает список соревнований, в которых участвует пользователь."""
     result = await db.execute(
         select(models.Competition)
         .join(models.Player, models.Competition.id == models.Player.competition_id)
         .where(models.Player.user_id == user_id)
     )
-    return list(result.scalars().all()) # <-- ASYNC CHANGE
+    return list(result.scalars().all()) 
 
 
 async def get_competition_by_chat_id(db: AsyncSession, chat_id: int) -> Optional[models.Competition]:
     """Получает соревнование по ID чата."""
-    from sqlalchemy import select
     result = await db.execute(select(models.Competition).where(models.Competition.chat_id == chat_id))
     return result.scalars().first()
 
-async def get_player_by_competition_and_user(db: AsyncSession, competition_id: int, user_id: int) -> Optional[models.Player]:
-    """Получает участника соревнования по ID соревнования и внутреннему ID пользователя."""
-    from sqlalchemy import select, and_
-    result = await db.execute(
-        select(models.Player)
-        .where(
-            and_(
-                models.Player.competition_id == competition_id,
-                models.Player.user_id == user_id
-            )
-        )
-    )
-    return result.scalars().first()
+
 
 async def get_user_by_username(db: AsyncSession, username: str) -> Optional[models.User]:
     """Получает пользователя по его Telegram username."""
@@ -333,4 +319,56 @@ async def get_user_by_username(db: AsyncSession, username: str) -> Optional[mode
     
     result = await db.execute(select(models.User).where(models.User.username == username))
     return result.scalars().first()
+
+
+
+async def get_administered_competitions(db: AsyncSession, user_id: int) -> List[models.Competition]:
+    """
+    Получает список соревнований, где пользователь является администратором
+    (создатель или в списке admins).
+    """
+    logger.debug(f"Fetching administered competitions for user ID: {user_id}")
+    try:
+        stmt = select(models.Competition).where(
+            models.Competition.creator_id == user_id
+        )
+        result = await db.execute(stmt)
+        competitions = list(result.scalars().all())
+        logger.debug(f"Found {len(competitions)} administered competitions for user {user_id}")
+        return competitions
+    except Exception as e:
+        logger.error(f"Error fetching administered competitions for user {user_id}: {e}", exc_info=True)
+        return [] 
+    
+
+    
+async def get_competition_players(db: AsyncSession, competition_id: int) -> List[models.Player]:
+    result = await db.execute(
+        select(models.Player)
+        .where(models.Player.competition_id == competition_id)
+        .order_by(models.Player.mmr.desc())
+        .options(selectinload(models.Player.user)) 
+    )
+    return list(result.scalars().all())
+
+
+async def get_played_competitions(db: AsyncSession, user_id: int) -> List[models.Competition]:
+    """
+    Получает список соревнований, в которых участвует (играл) пользователь.
+    """
+    logger.debug(f"Fetching played competitions for user ID: {user_id}")
+    try:
+        stmt = (
+            select(models.Competition)
+            .join(models.Player) 
+            .where(models.Player.user_id == user_id) 
+        )
+        result = await db.execute(stmt)
+        competitions = list(result.scalars().all())
+        logger.debug(f"Found {len(competitions)} played competitions for user {user_id}")
+        return competitions
+    except Exception as e:
+        logger.error(f"Error fetching played competitions for user {user_id}: {e}", exc_info=True)
+        return []
+    
 

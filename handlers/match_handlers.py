@@ -3,8 +3,7 @@
 Хендлеры для управления матчами/исходами в чатах соревнований.
 """
 import logging
-import re
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple
 
 from aiogram import Router, F
 from aiogram.types import Message
@@ -21,28 +20,6 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 
-async def is_user_admin_in_chat(bot, chat_id: int, user_id: int) -> bool:
-    """
-    Проверяет, является ли пользователь администратором в указанном чате.
-    """
-    try:
-        member = await bot.get_chat_member(chat_id, user_id)
-        return member.status in ['administrator', 'creator']
-    except TelegramAPIError as e:
-        logger.error(f"Ошибка при проверке админки пользователя {user_id} в чате {chat_id}: {e}")
-        return False
-
-async def ensure_player_registered(db: AsyncSession, competition_id: int, user_id: int, start_mmr: int = 0):
-    """
-    Гарантирует, что пользователь зарегистрирован как участник соревнования (Player).
-    Если нет - создает запись.
-    """
-    player = await crud.get_player_by_competition_and_user(db, competition_id, user_id)
-    if not player:
-        # Создаем нового участника с стартовым MMR из соревнования или переданным
-        player = await crud.get_or_create_player(db, competition_id, user_id, start_mmr)
-        logger.info(f"Пользователь ID {user_id} автоматически зарегистрирован в соревновании ID {competition_id} как Player ID {player.id}")
-    return player
 
 def parse_match_command(text: str) -> Tuple[str, List[Tuple[str, List[str]]], str]:
     """
@@ -152,7 +129,7 @@ def parse_match_command(text: str) -> Tuple[str, List[Tuple[str, List[str]]], st
 async def handle_match_outcome(message: Message, bot):
     """
     Обрабатывает команду /Исход в чате соревнования.
-    Формат: /Исход НазваниеСоревнования, @user1: ach1, ach2, @user2: ach3, @winner
+    Формат: /Исход НазваниеСоревнования, @user1: достижение, достижение, @user2: достижение, @winner
     """
     logger.info(f"Получена команда /Исход от пользователя {message.from_user.id} в чате {message.chat.id}")
 
@@ -161,7 +138,7 @@ async def handle_match_outcome(message: Message, bot):
         competition_name, participants_data, winner_username = parse_match_command(message.text)
         logger.debug(f"Распарсенные данные: соревнование={competition_name}, участники={participants_data}, победитель={winner_username}")
     except ValueError as e:
-        await message.reply(f"❌ Ошибка в формате команды: {e}\nИспользуйте: `/Исход НазваниеСоревнования @user1: ach1, ach2, @user2: ach3, @winner`", parse_mode='Markdown')
+        await message.reply(f"❌ Ошибка в формате команды: {e}\nИспользуйте: `/Исход НазваниеСоревнования, @user1: достижение, достижение, @user2: достижение, @winner`", parse_mode='Markdown')
         return
 
     # Используем асинхронный контекстный менеджер для сессии
@@ -198,11 +175,10 @@ async def handle_match_outcome(message: Message, bot):
                 sender_db_user.id == competition.creator_id or
                 sender_db_user.id in competition.admins
             )
-            sender_is_chat_admin = await is_user_admin_in_chat(bot, message.chat.id, sender_telegram_id)
 
-            if not (sender_is_competition_admin or sender_is_chat_admin):
+            if not (sender_is_competition_admin):
                 await message.reply(
-                    "❌ Вы не являетесь администратором этого соревнования или чата.",
+                    "❌ Вы не являетесь администратором этого соревнования.",
                     disable_notification=True
                 )
                 return
@@ -248,7 +224,7 @@ async def handle_match_outcome(message: Message, bot):
                     except TelegramAPIError as e:
                         # Не удалось получить пользователя из чата
                         logger.warning(f"Не удалось получить пользователя {username} из чата {message.chat.id}: {e}")
-                        errors.append(f"Пользователь {username} не найден в чате или не может быть добавлен.")
+                        errors.append(f"Пользователь {username} не зарегестрирован в боте")
                     except Exception as e:
                         logger.error(f"Ошибка при добавлении пользователя {username} в БД: {e}")
                         errors.append(f"Ошибка при обработке пользователя {username}.")
@@ -262,7 +238,7 @@ async def handle_match_outcome(message: Message, bot):
             player_objs_map = {} # internal_user_id -> models.Player obj
             for username, internal_id in user_internal_ids.items():
                 try:
-                    player_obj = await ensure_player_registered(db, competition.id, internal_id, competition.start_mmr)
+                    player_obj = await crud.get_or_create_player(db, competition.id, internal_id, competition.start_mmr)
                     player_objs_map[internal_id] = player_obj
                 except Exception as e:
                      logger.error(f"Ошибка при регистрации игрока {username} (ID: {internal_id}) в соревновании {competition.id}: {e}")
@@ -284,14 +260,9 @@ async def handle_match_outcome(message: Message, bot):
             mmr_changes = {} # internal_id -> mmr_delta
             errors_during_mmr_calc = [] # Ошибки, возникшие при расчете MMR
 
-            # Получаем объекты Player для всех участников, чтобы узнать их текущий MMR
-            player_objs_for_mmr_calc = {} # internal_id -> Player obj
-            for internal_id in user_internal_ids.values():
-                 player_obj = player_objs_map.get(internal_id)
-                 if player_obj:
-                     player_objs_for_mmr_calc[internal_id] = player_obj
-                 # else: Если объект Player не найден, это ошибка, но она должна была возникнуть раньше.
-                 # Мы просто пропустим его в расчете.
+
+            player_objs_for_mmr_calc = player_objs_map
+                
 
             # Для каждого участника рассчитываем его изменение MMR относительно каждого оппонента
             for internal_id, player_obj in player_objs_for_mmr_calc.items():
@@ -428,8 +399,3 @@ async def handle_match_outcome(message: Message, bot):
                 f"❌ Произошла внутренняя ошибка: {e}",
                 disable_notification=True
             )
-        # finally:
-        #     # Сессия закроется автоматически благодаря async with
-
-# --- Не забудь добавить недостающие функции в crud.py ---
-# (См. следующий блок кода)

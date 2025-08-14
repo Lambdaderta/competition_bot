@@ -4,27 +4,21 @@ import os
 import logging
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-# from sqlalchemy.ext.declarative import declarative_base # <-- УДАЛИТЬ ЭТУ СТРОКУ
 from sqlalchemy import text
 
-# --- Настройка логирования для этого модуля ---
 logger = logging.getLogger(__name__)
 
-# --- ИМПОРТИРУЕМ МОДЕЛИ (и Base) ---
-# Это КРИТИЧЕСКИ ВАЖНО, чтобы metadata знала о всех таблицах
-# Делаем это как можно раньше
-from . import models # <-- Импортируем models, включая models.Base
 
-# --- Теперь используем Base из models ---
-Base = models.Base # <-- Берем Base, определенный в models.py
-# ------------------------------------
+from . import models
 
-# --- ПЕРЕМЕННЫЕ уровня МОДУЛЯ, но БЕЗ РАННЕЙ ПРОВЕРКИ ---
-# Эти переменные будут инициализированы позже, при первом вызове get_engine()
-# или init_db(). Это позволяет избежать ошибок импорта.
+Base = models.Base 
+
+
+
 _engine = None
 _AsyncSessionLocal = None
 DATABASE_URL = None # Будет установлен позже
+
 
 # --- ФУНКЦИИ ДЛЯ ЛЕНИВОЙ ИНИЦИАЛИЗАЦИИ ---
 def get_engine():
@@ -40,6 +34,7 @@ def get_engine():
         _engine = create_async_engine(DATABASE_URL, echo=False)
     return _engine
 
+
 def get_sessionmaker():
     """Ленивая инициализация фабрики сессий."""
     global _AsyncSessionLocal
@@ -52,6 +47,7 @@ def get_sessionmaker():
         )
     return _AsyncSessionLocal
 
+
 # --- ФУНКЦИИ ДЛЯ РАБОТЫ С БД ---
 # Функция для получения сессии БД
 async def get_db():
@@ -59,6 +55,7 @@ async def get_db():
     AsyncSessionLocal = get_sessionmaker()
     async with AsyncSessionLocal() as session:
         yield session
+
 
 # --- ИЗМЕНЕНО: init_models теперь просто асинхронная функция ---
 async def init_models():
@@ -97,7 +94,7 @@ async def init_models():
                 logger.warning(f"Не удалось получить список таблиц ПОСЛЕ создания: {e}")
     logger.info("Конец database.init_models()")
 
-# --- ИЗМЕНЕНО: init_db теперь асинхронная ---
+
 async def init_db():
     """
     Асинхронная инициализация базы данных.
@@ -110,24 +107,3 @@ async def init_db():
         logger.error(f"Ошибка внутри database.init_db(): {e}", exc_info=True)
         raise
     logger.info("Конец database.init_db()")
-
-# --- Синхронная обёртка для lifespan (если очень нужно) ---
-def init_db_sync():
-    """Синхронная обертка."""
-    logger.info("Начало database.init_db_sync()")
-    import asyncio
-    try:
-        try:
-            loop = asyncio.get_running_loop()
-            logger.warning("init_db_sync вызвана внутри запущенного loop. Используйте await init_db() напрямую.")
-            raise RuntimeError("Используйте await init_db() напрямую в асинхронном коде.")
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            logger.info("Запуск init_db в новом event loop...")
-            loop.run_until_complete(init_db())
-            logger.info("init_db завершена в новом loop.")
-    except Exception as e:
-        logger.error(f"Ошибка в init_db_sync: {e}", exc_info=True)
-        raise
-    logger.info("Конец database.init_db_sync()")

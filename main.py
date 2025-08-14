@@ -7,13 +7,14 @@ from pathlib import Path
 import os
 from dotenv import load_dotenv
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from handlers import match_handlers 
 from handlers import reg_handler
+from handlers import admin_commands
 
 # --- Настройка логирования ДО ВСЕГО ---
 logging.basicConfig(
@@ -52,58 +53,53 @@ if not BOT_TOKEN:
     logger.critical("BOT_TOKEN не установлен! Выход.")
     raise ValueError("BOT_TOKEN не найден в .env файле или переменных окружения.")
 
-# --- Импорт из вашего проекта ---
-logger.info("Импорт роутеров...")
-from handlers import base_handlers, org_handlers
 
-logger.info("Импорт функции init_db...")
-# Импортируем АСИНХРОННУЮ функцию
-from database import init_db # Это теперь async def init_db()
+from handlers import base_handlers, org_handlers, player_handlers
 
-# --- Инициализация бота и диспетчера ---
-# lifespan упрощаем, так как основная инициализация будет в main
+from database import init_db 
+
+
+async def set_commands(bot: Bot):
+    commands = [
+        types.BotCommand(command="start", description="Основная команда. Нажимайте"),
+        types.BotCommand(command="help", description="Помощь"),
+        types.BotCommand(command="add_admin", description="Добавить админа в соревнование, подробнее в help")
+    ]
+    await bot.set_my_commands(commands)
+
+
 @asynccontextmanager
 async def lifespan(dp: Dispatcher):
-    """Менеджер жизненного цикла."""
-    logger.info(">>> НАЧАЛО lifespan <<<")
-    # Дополнительная логика при старте/остановке может быть здесь
     yield
-    logger.info(">>> ЗАВЕРШЕНИЕ lifespan <<<")
 
 async def main():
-    """Главная асинхронная функция для запуска бота."""
-    logger.info("=== НАЧАЛО main() ===")
     
-    # --- АСИНХРОННАЯ ИНИЦИАЛИЗАЦИЯ БД ---
-    logger.info("Асинхронный вызов database.init_db()...")
     try:
         await init_db() # <-- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: await
-        logger.info("Асинхронная database.init_db() завершена. Файл БД должен быть создан.")
     except Exception as e:
-        logger.error(f"Ошибка при асинхронной инициализации БД: {e}", exc_info=True)
         raise
     # -------------------------------------
 
     logger.info("Создание хранилища состояний...")
     storage = MemoryStorage()
 
-    logger.info("Создание диспетчера...")
     dp = Dispatcher(storage=storage, lifespan=lifespan)
 
-    logger.info("Создание бота...")
     bot = Bot(
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
 
-    logger.info("Регистрация роутеров...")
     dp.include_router(base_handlers.router)
     dp.include_router(org_handlers.router)
     dp.include_router(match_handlers.router)
     dp.include_router(reg_handler.router) 
+    dp.include_router(admin_commands.router)
+    dp.include_router(player_handlers.router)
 
-    logger.info("Запуск поллинга бота...")
+
     try:
+        await set_commands(bot)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен пользователем (KeyboardInterrupt/SystemExit).")

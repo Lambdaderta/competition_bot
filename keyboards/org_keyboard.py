@@ -102,12 +102,11 @@ def get_my_competitions_keyboard(
     """
     keyboard = []
 
-    # Добавляем кнопки для каждого соревнования на странице
-    for comp in competitions:
-        button_text = f"{comp.name} (ID: {comp.id})"
-        # Предполагаем, что будет callback_data для выбора соревнования, например, "view_comp_{id}"
-        # Пока просто заглушка, можно расширить до меню управления соревнованием
-        keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"view_comp_{comp.id}")])
+    # for comp in competitions:
+    #     button_text = f"{comp.name} (ID: {comp.id})"
+    #     # Предполагаем, что будет callback_data для выбора соревнования, например, "view_comp_{id}"
+    #     # Пока просто заглушка, можно расширить до меню управления соревнованием
+    #     keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"view_comp_{comp.id}")])
 
     # Добавляем кнопки навигации
     nav_buttons = []
